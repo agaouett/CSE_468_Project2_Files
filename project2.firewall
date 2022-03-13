@@ -1,0 +1,140 @@
+#!/bin/sh
+
+# Alex Gaouette
+# agaouett@asu.edu
+# CSE 468 - Spring 2022
+# Project 2 - Packet Filter Firewall
+# March 13, 2022
+# This is a basic packet filtering firewall implementation using iptables and
+# is inspired by rc.firewall, originally created by Professor Dijiang Huang.
+# rc.firewall may be accessed at the URL that follows
+# https://gitlab.thothlab.org/thoth-group/ThoThLabResource/raw/master/lab-cs-cns-00001a.zip
+
+
+
+##### Variables #####
+
+# Variables are assigned for clarity in rule creation
+
+# Client Variables
+Client_IP="192.168.0.10"
+
+# Server Variables
+Server_IP="10.0.0.10"
+Web_IP="10.0.0.10"
+FTP_IP="10.0.0.10"
+SSH_IP="10.0.0.10"
+
+# Gateway Variables
+GW_Client_IP="192.168.0.100" # GW's Client Facing Interface's IP Address
+GW_Server_IP="10.0.0.100" # GW's Server Facing Interface's IP Address
+Client_Facing_IF="enp0s3"
+Server_Facing_IF="enp0s8"
+
+# NAT Variables - Used for NAT rules. This is the same as the GW's Client
+# facing IP Address
+NAT_WEB_IP="192.168.0.100"
+NAT_FTP_IP="192.168.0.100"
+NAT_SSH_IP="192.168.0.100"
+
+# Variable to location of iptables
+IPTABLES="/sbin/iptables"
+
+
+##### Flush and Delete All Chains #####
+
+$IPTABLES -F # Flush default chains
+$IPTABLES -X # Delete user chains
+$IPTABLES -F -t nat # Flush NAT table rules
+
+
+##### Enable Packet Forwarding #####
+
+echo "1" > /proc/sys/net/ipv4/ip_forward
+
+
+##### Packet Filtering Rule Definition #####
+
+# Set default policy to DROP for all default chains (Whitelist Policy)
+$IPTABLES -P INPUT DROP
+$IPTABLES -P OUTPUT DROP
+$IPTABLES -P FORWARD DROP
+
+# Rules will now be appended to chains individually to create the desired
+# packet filtering policy outlined in the project requirements
+
+## INPUT Chain Rules ##
+# These rules affect packets entering the Gateway externally (with a local destination)
+
+# Allow the Client to ping the GW's client-facing IP address
+$IPTABLES -A INPUT -p ICMP --icmp-type echo-request -s $Client_IP -d $GW_Client_IP -i $Client_Facing_IF -j ACCEPT
+
+# Allow the Server to ping the GW's server-facing IP address
+$IPTABLES -A INPUT -p ICMP --icmp-type echo-request -s $Server_IP -d $GW_Server_IP -i $Server_Facing_IF -j ACCEPT
+
+## OUTPUT Chain Rules ##
+# These rules affect Gateway originated packets
+
+# Allow the Gateway to respond to Client's pings
+$IPTABLES -A OUTPUT -p ICMP --icmp-type echo-reply -s $GW_Client_IP -d $Client_IP -o $Client_Facing_IF -j ACCEPT
+
+# Allow the Gateway to respond to Server's pings
+$IPTABLES -A OUTPUT -p ICMP --icmp-type echo-reply -s $GW_Server_IP -d $Server_IP -o $Server_Facing_IF -j ACCEPT
+
+## FORWARD Chain Rules ##
+# These rules affect packets entering the Gateway that are destined outside the Gateway
+
+# Allow the Server to ping the Client
+$IPTABLES -A FORWARD -p ICMP --icmp-type echo-request -s $Server_IP -d $Client_IP -i $Server_Facing_IF -o $Client_Facing_IF -j ACCEPT
+
+# Allow the Client to respond to Server pings
+$IPTABLES -A FORWARD -p ICMP --icmp-type echo-reply -s $Client_IP -d $Server_IP -i $Client_Facing_IF -o $Server_Facing_IF -j ACCEPT
+
+# Allow the Client to SSH into Server
+$IPTABLES -A FORWARD -p TCP -s $Client_IP -d $Server_IP --dport 22 -i $Client_Facing_IF -o $Server_Facing_IF -j ACCEPT
+$IPTABLES -A FORWARD -p TCP -s $Server_IP -d $Client_IP --sport 22 -i $Server_Facing_IF -o $Client_Facing_IF -j ACCEPT
+
+# Allow the Client access to the Server's Webservice
+$IPTABLES -A FORWARD -p TCP -s $Client_IP -d $Server_IP --dport 80 -i $Client_Facing_IF -o $Server_Facing_IF -j ACCEPT
+$IPTABLES -A FORWARD -p TCP -s $Server_IP -d $Client_IP --sport 80 -i $Server_Facing_IF -o $Client_Facing_IF -j ACCEPT
+
+# Allow the Client access to the Server's FTP Service
+# Client > Server Control Port
+$IPTABLES -A FORWARD -p TCP -s $Client_IP -d $Server_IP --dport 21 -i $Client_Facing_IF -o $Server_Facing_IF -j ACCEPT
+# Client > Server Data Ports
+$IPTABLES -A FORWARD -p TCP -s $Client_IP -d $Server_IP --dport 30000:30099 -i $Client_Facing_IF -o $Server_Facing_IF -j ACCEPT
+# Server > Client Control Port
+$IPTABLES -A FORWARD -p TCP -s $Server_IP -d $Client_IP --sport 21 -i $Server_Facing_IF -o $Client_Facing_IF -j ACCEPT
+# Server > Client Data Ports
+$IPTABLES -A FORWARD -p TCP -s $Server_IP -d $Client_IP --sport 30000:30099 -i $Server_Facing_IF -o $Client_Facing_IF -j ACCEPT
+
+
+##### NAT Table Rules #####
+
+## PREROUTING Rules ##
+
+# NAT from GW IP to Server IP for SSH service
+$IPTABLES -t nat -A PREROUTING -p TCP -d $NAT_SSH_IP --dport 22 -i $Client_Facing_IF -j DNAT --to-destination $Server_IP:22
+
+# NAT from GW IP to Server IP for Web service
+$IPTABLES -t nat -A PREROUTING -p TCP -d $NAT_WEB_IP --dport 80 -i $Client_Facing_IF -j DNAT --to-destination $Server_IP:80
+
+# NAT from GW IP to Server IP for FTP service
+$IPTABLES -t nat -A PREROUTING -p TCP -d $NAT_FTP_IP --dport 21 -i $Client_Facing_IF -j DNAT --to-destination $Server_IP:21
+$IPTABLES -t nat -A PREROUTING -p TCP -d $NAT_FTP_IP --dport 30000:30099 -i $Client_Facing_IF -j DNAT --to-destination $Server_IP:30000-30099
+
+## POSTROUTING Rules ##
+
+# NAT from Server IP to GW IP for SSH service
+$IPTABLES -t nat -A POSTROUTING -p TCP -s $Server_IP --sport 22 -o $Client_Facing_IF -j SNAT --to-source $NAT_SSH_IP:22
+
+# NAT from Server IP to GW IP for Web service
+$IPTABLES -t nat -A POSTROUTING -p TCP -s $Server_IP --sport 80 -o $Client_Facing_IF -j SNAT --to-source $NAT_WEB_IP:80
+
+# NAT from Server IP to GW IP for FTP service
+$IPTABLES -t nat -A POSTROUTING -p TCP -s $Server_IP --sport 21 -o $Client_Facing_IF -j SNAT --to-source $NAT_FTP_IP:21
+$IPTABLES -t nat -A POSTROUTING -p TCP -s $Server_IP --sport 30000:30099 -o $Client_Facing_IF -j SNAT --to-source $NAT_FTP_IP:30000-30099
+
+# Allow Server to ping Client while obfuscating Server's IP address
+$IPTABLES -t nat -A POSTROUTING -p ICMP -s $Server_IP -d $Client_IP -o $Client_Facing_IF -j MASQUERADE
+
